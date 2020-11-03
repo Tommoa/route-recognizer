@@ -170,22 +170,67 @@ impl<T> Router<T> {
         let nfa = &mut self.nfa;
         let mut state = 0;
         let mut metadata = Metadata::new();
+        let segments: Vec<_> = route.split('/').collect();
 
-        for (i, segment) in route.split('/').enumerate() {
-            if i > 0 {
-                state = nfa.put(state, CharacterClass::valid_char('/'));
+        for (i, segment) in segments.iter().enumerate() {
+            let mut chars = segment.chars();
+            let mut is_static = true;
+            while let Some(char) = chars.next() {
+                if char == '{' {
+                    let param_name: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                    let (param_name, pattern) =
+                        param_name.split_at(param_name.find(':').unwrap_or(param_name.len()));
+                    is_static = false;
+                    metadata.param_names.push(param_name.into());
+                    match pattern.as_bytes().get(1) {
+                        // There's no `:`, so its just a parameter
+                        None => {
+                            metadata.dynamics += 1;
+                            state = nfa.put(state, CharacterClass::invalid_char('/'));
+                            // Links to itself for repeats
+                            nfa.put_state(state, state);
+                            nfa.start_capture(state);
+                            nfa.end_capture(state);
+                        }
+                        // * indicates a greedy glob
+                        Some(b'*') => {
+                            metadata.stars += 1;
+                            state = nfa.put(state, CharacterClass::any());
+                            // Links to itself for repeats
+                            nfa.put_state(state, state);
+                            nfa.start_capture(state);
+                            nfa.end_capture(state);
+                        }
+                        // ! indicates that we go until one of the following characters is met
+                        Some(b'!') => {
+                            metadata.dynamics += 1;
+                            let mut pattern = pattern[2..].to_owned();
+                            pattern.push('/');
+                            state = nfa.put(state, CharacterClass::invalid(&pattern));
+                            nfa.put_state(state, state);
+                            nfa.start_capture(state);
+                            nfa.end_capture(state);
+                        }
+                        // Otherwise we go whilst we have one of the following characters
+                        Some(_) => {
+                            metadata.dynamics += 1;
+                            let state = nfa.put(state, CharacterClass::valid(&pattern[1..]));
+                            nfa.put_state(state, state);
+                            nfa.start_capture(state);
+                            nfa.end_capture(state);
+                        }
+                    }
+                } else {
+                    state = nfa.put(state, CharacterClass::valid_char(char));
+                }
             }
 
-            if !segment.is_empty() && segment.as_bytes()[0] == b':' {
-                state = process_dynamic_segment(nfa, state);
-                metadata.dynamics += 1;
-                metadata.param_names.push(segment[1..].to_string());
-            } else if !segment.is_empty() && segment.as_bytes()[0] == b'*' {
-                state = process_star_state(nfa, state);
-                metadata.stars += 1;
-                metadata.param_names.push(segment[1..].to_string());
-            } else {
-                state = process_static_segment(segment, nfa, state);
+            // We've finished this segment, so we need to cap it off with a '/'
+            if i != segments.len() - 1 {
+                // Create a new state
+                state = nfa.put(state, CharacterClass::valid_char('/'));
+            }
+            if is_static {
                 metadata.statics += 1;
             }
         }
@@ -301,7 +346,7 @@ mod tests {
         let mut router = Router::new();
 
         router.add("/posts/new", "new".to_string());
-        router.add("/posts/:id", "id".to_string());
+        router.add("/posts/{id}", "id".to_string());
 
         let id = router.recognize("/posts/1").unwrap();
 
@@ -317,7 +362,7 @@ mod tests {
     fn ambiguous_router_b() {
         let mut router = Router::new();
 
-        router.add("/posts/:id", "id".to_string());
+        router.add("/posts/{id}", "id".to_string());
         router.add("/posts/new", "new".to_string());
 
         let id = router.recognize("/posts/1").unwrap();
@@ -334,8 +379,8 @@ mod tests {
     fn multiple_params() {
         let mut router = Router::new();
 
-        router.add("/posts/:post_id/comments/:id", "comment".to_string());
-        router.add("/posts/:post_id/comments", "comments".to_string());
+        router.add("/posts/{post_id}/comments/{id}", "comment".to_string());
+        router.add("/posts/{post_id}/comments", "comments".to_string());
 
         let com = router.recognize("/posts/12/comments/100").unwrap();
         let coms = router.recognize("/posts/12/comments").unwrap();
@@ -352,8 +397,8 @@ mod tests {
     fn star() {
         let mut router = Router::new();
 
-        router.add("*foo", "test".to_string());
-        router.add("/bar/*foo", "test2".to_string());
+        router.add("{foo:*}", "test".to_string());
+        router.add("/bar/{foo:*}", "test2".to_string());
 
         let m = router.recognize("/test").unwrap();
         assert_eq!(*m.handler, "test".to_string());
@@ -372,9 +417,9 @@ mod tests {
     fn star_colon() {
         let mut router = Router::new();
 
-        router.add("/a/*b", "ab".to_string());
-        router.add("/a/*b/c", "abc".to_string());
-        router.add("/a/*b/c/:d", "abcd".to_string());
+        router.add("/a/{b:*}", "ab".to_string());
+        router.add("/a/{b:*}/c", "abc".to_string());
+        router.add("/a/{b:*}/c/{d}", "abcd".to_string());
 
         let m = router.recognize("/a/foo").unwrap();
         assert_eq!(*m.handler, "ab".to_string());
@@ -409,8 +454,9 @@ mod tests {
     fn unnamed_parameters() {
         let mut router = Router::new();
 
-        router.add("/foo/:/bar", "test".to_string());
-        router.add("/foo/:bar/*", "test2".to_string());
+        router.add("/foo/{}/bar", "test".to_string());
+        router.add("/foo/{bar}/{:*}", "test2".to_string());
+
         let m = router.recognize("/foo/test/bar").unwrap();
         assert_eq!(*m.handler, "test");
         assert_eq!(m.params, Params::new());
@@ -418,6 +464,17 @@ mod tests {
         let m = router.recognize("/foo/test/blah").unwrap();
         assert_eq!(*m.handler, "test2");
         assert_eq!(m.params, params("bar", "test"));
+    }
+
+    #[test]
+    fn extensions_and_prefixes() {
+        let mut router = Router::new();
+
+        router.add("/foo/b{}r", 0);
+
+        assert!(router.recognize("/foo/bar").is_ok());
+        assert!(router.recognize("/foo/baaaar").is_ok());
+        assert!(router.recognize("/foo/caaaar").is_err());
     }
 
     fn params(key: &str, val: &str) -> Params {
