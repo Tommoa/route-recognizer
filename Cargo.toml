@@ -7,4 +7,7 @@ keywords = ["router", "url"]
 edition = "2018"
 
 version = "0.2.0"
-authors = ["wycats", "rustasync"]
+authors = ["wycats", "rustasync", "Tommoa"]
+
+[dependencies]
+log = "0.4"

@@ -10,7 +10,7 @@ use crate::nfa::{CharacterClass, NFA};
 pub mod nfa;
 
 /// The metadata that we will store in the acceptance points of the NFA
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Metadata {
     statics: u32,
     dynamics: u32,
@@ -163,6 +163,7 @@ impl<T> Router<T> {
 
     /// Add a `route` to the Router, with a value to return if the route is recognized.
     pub fn add(&mut self, mut route: &str, dest: T) {
+        log::trace!("Adding route: {:?}", route);
         if !route.is_empty() && route.as_bytes()[0] == b'/' {
             route = &route[1..];
         }
@@ -173,6 +174,18 @@ impl<T> Router<T> {
         let segments: Vec<_> = route.split('/').collect();
 
         for (i, segment) in segments.iter().enumerate() {
+            // Special logic for tide, which appends a special globbing pattern
+            // to allow for nesting
+            if i == segments.len() - 1 && *segment == "*--tide-path-rest" {
+                metadata.stars += 1;
+                metadata.param_names.push("--tide-path-rest".into());
+                state = nfa.put(state, CharacterClass::any());
+                // Links to itself for repeats
+                nfa.put_state(state, state);
+                nfa.start_capture(state);
+                nfa.end_capture(state);
+                continue;
+            }
             let mut chars = segment.chars();
             let mut is_static = true;
             while let Some(char) = chars.next() {
@@ -242,12 +255,15 @@ impl<T> Router<T> {
 
     /// Attempt to find a route defined by `path` in the Router
     pub fn recognize(&self, mut path: &str) -> Result<Match<&T>, String> {
+        log::trace!("Trying to recognize {:?}", path);
         if !path.is_empty() && path.as_bytes()[0] == b'/' {
             path = &path[1..];
         }
 
         let nfa = &self.nfa;
         let result = nfa.process(path, |index| nfa.get(index).metadata.as_ref().unwrap());
+
+        log::trace!("Recognition result: {:?}", result);
 
         match result {
             Ok(nfa_match) => {
@@ -274,32 +290,6 @@ impl<T> Default for Router<T> {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn process_static_segment<T>(segment: &str, nfa: &mut NFA<T>, mut state: usize) -> usize {
-    for char in segment.chars() {
-        state = nfa.put(state, CharacterClass::valid_char(char));
-    }
-
-    state
-}
-
-fn process_dynamic_segment<T>(nfa: &mut NFA<T>, mut state: usize) -> usize {
-    state = nfa.put(state, CharacterClass::invalid_char('/'));
-    nfa.put_state(state, state);
-    nfa.start_capture(state);
-    nfa.end_capture(state);
-
-    state
-}
-
-fn process_star_state<T>(nfa: &mut NFA<T>, mut state: usize) -> usize {
-    state = nfa.put(state, CharacterClass::any());
-    nfa.put_state(state, state);
-    nfa.start_capture(state);
-    nfa.end_capture(state);
-
-    state
 }
 
 #[cfg(test)]
@@ -475,6 +465,20 @@ mod tests {
         assert!(router.recognize("/foo/bar").is_ok());
         assert!(router.recognize("/foo/baaaar").is_ok());
         assert!(router.recognize("/foo/caaaar").is_err());
+    }
+
+    #[test]
+    fn extension_with_globbing() {
+        let mut router = Router::new();
+
+        router.add("/{prefix:*}/{end}bar", 0);
+
+        let m = router.recognize("/foo/foobar");
+
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+        assert_eq!(m.params, two_params("prefix", "foo", "end", "foo"))
     }
 
     fn params(key: &str, val: &str) -> Params {
