@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use self::CharacterClass::{Ascii, InvalidChars, ValidChars};
 
-#[derive(PartialEq, Eq, Clone, Default)]
+/// A set of characters
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct CharSet {
     low_mask: u64,
     high_mask: u64,
@@ -10,6 +11,7 @@ pub struct CharSet {
 }
 
 impl CharSet {
+    /// Create a new CharSet
     pub fn new() -> Self {
         Self {
             low_mask: 0,
@@ -18,6 +20,7 @@ impl CharSet {
         }
     }
 
+    /// Insert a character into the CharSet
     pub fn insert(&mut self, char: char) {
         let val = char as u32 - 1;
 
@@ -32,6 +35,7 @@ impl CharSet {
         }
     }
 
+    /// Determine of `char` exists in this CharSet
     pub fn contains(&self, char: char) -> bool {
         let val = char as u32 - 1;
 
@@ -47,7 +51,10 @@ impl CharSet {
     }
 }
 
-#[derive(PartialEq, Eq, Clone)]
+/// A group of either valid or invalid characters.
+///
+/// These are equivalent to the `[]` groups in regex
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum CharacterClass {
     Ascii(u64, u64, bool),
     ValidChars(CharSet),
@@ -55,18 +62,25 @@ pub enum CharacterClass {
 }
 
 impl CharacterClass {
+    /// Any character is valid
     pub fn any() -> Self {
         Ascii(u64::max_value(), u64::max_value(), true)
     }
 
+    /// Characters in the input `string` are valid matches.
+    /// Equivalent to the regex `[<string>]`
     pub fn valid(string: &str) -> Self {
         ValidChars(Self::str_to_set(string))
     }
 
+    /// Characters in the input `string` are invalid.
+    /// Equivalent to the regex `[^<string>]`
     pub fn invalid(string: &str) -> Self {
         InvalidChars(Self::str_to_set(string))
     }
 
+    /// Only the given `char` is valid.
+    /// Equivalent to the regex `<char>`.
     pub fn valid_char(char: char) -> Self {
         let val = char as u32 - 1;
 
@@ -79,6 +93,8 @@ impl CharacterClass {
         }
     }
 
+    /// Only the given `char` is invalid.
+    /// Equivalent to the regex `[^<char>]`
     pub fn invalid_char(char: char) -> Self {
         let val = char as u32 - 1;
 
@@ -91,6 +107,7 @@ impl CharacterClass {
         }
     }
 
+    /// Checks whether the given `char` is allowed in the set
     pub fn matches(&self, char: char) -> bool {
         match *self {
             ValidChars(ref valid) => valid.contains(char),
@@ -108,12 +125,14 @@ impl CharacterClass {
         }
     }
 
+    /// Utility function to turn a char into a `CharSet`
     fn char_to_set(char: char) -> CharSet {
         let mut set = CharSet::new();
         set.insert(char);
         set
     }
 
+    /// Utility function to turn a string into a `CharSet`
     fn str_to_set(string: &str) -> CharSet {
         let mut set = CharSet::new();
         for char in string.chars() {
@@ -123,7 +142,8 @@ impl CharacterClass {
     }
 }
 
-#[derive(Clone)]
+/// A thread that has weaved through our NFA
+#[derive(Debug, Clone)]
 struct Thread {
     state: usize,
     captures: Vec<(usize, usize)>,
@@ -131,6 +151,7 @@ struct Thread {
 }
 
 impl Thread {
+    /// Create a new Thread at state 0
     pub fn new() -> Self {
         Self {
             state: 0,
@@ -139,17 +160,20 @@ impl Thread {
         }
     }
 
+    /// Start a capture
     #[inline]
     pub fn start_capture(&mut self, start: usize) {
         self.capture_begin = Some(start);
     }
 
+    /// Finish a capture
     #[inline]
     pub fn end_capture(&mut self, end: usize) {
         self.captures.push((self.capture_begin.unwrap(), end));
         self.capture_begin = None;
     }
 
+    /// Extract all captures
     pub fn extract<'a>(&self, source: &'a str) -> Vec<&'a str> {
         self.captures
             .iter()
@@ -158,14 +182,22 @@ impl Thread {
     }
 }
 
-#[derive(Clone)]
+/// A state for the non-deterministic finite automaton to be in
+#[derive(Debug, Clone)]
 pub struct State<T> {
+    /// The index of this state
     pub index: usize,
+    /// The character class of this state
     pub chars: CharacterClass,
+    /// The states that we can move to
     pub next_states: Vec<usize>,
+    /// Can we finish here?
     pub acceptance: bool,
+    /// Do we start a capture here?
     pub start_capture: bool,
+    /// Do we end a capture here?
     pub end_capture: bool,
+    /// Storing metadata in our states
     pub metadata: Option<T>,
 }
 
@@ -176,6 +208,7 @@ impl<T> PartialEq for State<T> {
 }
 
 impl<T> State<T> {
+    /// Create a new state at an index with some chars
     pub fn new(index: usize, chars: CharacterClass) -> Self {
         Self {
             index,
@@ -189,26 +222,94 @@ impl<T> State<T> {
     }
 }
 
+/// A successful match of the NFA with the final state and its captures
+#[derive(Debug)]
 pub struct Match<'a> {
     pub state: usize,
     pub captures: Vec<&'a str>,
 }
 
 impl<'a> Match<'a> {
+    /// Create the successful match from a state and captures
     pub fn new<'b>(state: usize, captures: Vec<&'b str>) -> Match<'b> {
         Match { state, captures }
     }
 }
 
-#[derive(Clone, Default)]
+/// An error that indicates an issue processing a string with the NFA
+#[derive(Debug)]
+pub struct ProcessFailure(String);
+
+impl core::fmt::Display for ProcessFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::write!(f, "Couldn't process {}", self.0)
+    }
+}
+impl std::error::Error for ProcessFailure {}
+
+/// An error that indicates that an acceptance state was not reached whilst processing a string
+#[derive(Debug)]
+pub struct Exhausted(String);
+
+impl core::fmt::Display for Exhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::write!(
+            f,
+            "{} was exhausted before reaching an acceptance state",
+            self.0
+        )
+    }
+}
+impl std::error::Error for Exhausted {}
+
+/// An error whilst processing a string using the NFA
+#[derive(Debug)]
+pub enum NFAError {
+    ProcessFailure(ProcessFailure),
+    Exhausted(Exhausted),
+}
+
+impl core::fmt::Display for NFAError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::write!(
+            f,
+            "{}",
+            match self {
+                Self::ProcessFailure(err) => err.to_string(),
+                Self::Exhausted(err) => err.to_string(),
+            }
+        )
+    }
+}
+impl std::error::Error for NFAError {}
+
+impl core::convert::From<ProcessFailure> for NFAError {
+    fn from(err: ProcessFailure) -> Self {
+        Self::ProcessFailure(err)
+    }
+}
+
+impl core::convert::From<Exhausted> for NFAError {
+    fn from(err: Exhausted) -> Self {
+        Self::Exhausted(err)
+    }
+}
+
+/// A structure representing a non-deterministic finite automaton
+#[derive(Debug, Clone, Default)]
 pub struct NFA<T> {
+    /// The list of possible states
     states: Vec<State<T>>,
+    /// Whether each state can start a capture
     start_capture: Vec<bool>,
+    /// Whether each state can end a capture
     end_capture: Vec<bool>,
+    /// Does this state indicate acceptance?
     acceptance: Vec<bool>,
 }
 
 impl<T> NFA<T> {
+    /// Create a new automaton
     pub fn new() -> Self {
         let root = State::new(0, CharacterClass::any());
         Self {
@@ -219,7 +320,13 @@ impl<T> NFA<T> {
         }
     }
 
-    pub fn process<'a, I, F>(&self, string: &'a str, mut ord: F) -> Result<Match<'a>, String>
+    /// Try to match a string with the NFA and a function that gives orderings to the states.
+    ///
+    /// If a match is found, it is returned with its captures and final state, otherwise an
+    /// `NFAError` is returned.
+    /// An `NFAError` indicates that either an acceptance state couldn't be reached, or there was a
+    /// failure in processing the string.
+    pub fn process<'a, I, F>(&self, string: &'a str, mut ord: F) -> Result<Match<'a>, NFAError>
     where
         I: Ord,
         F: FnMut(usize) -> I,
@@ -227,19 +334,23 @@ impl<T> NFA<T> {
         let mut threads = vec![Thread::new()];
 
         for (i, char) in string.chars().enumerate() {
+            // Try the next character
             let next_threads = self.process_char(threads, char, i);
 
+            // Nowhere to go
             if next_threads.is_empty() {
-                return Err(format!("Couldn't process {}", string));
+                return Err(ProcessFailure(string.into()).into());
             }
 
             threads = next_threads;
         }
 
+        // Only threads that are at acceptance
         let returned = threads
             .into_iter()
             .filter(|thread| self.get(thread.state).acceptance);
 
+        // Try to reduce the threads to just one
         let thread = returned
             .fold(None, |prev, y| {
                 let y_v = ord(y.state);
@@ -257,9 +368,7 @@ impl<T> NFA<T> {
             .map(|p| p.1);
 
         match thread {
-            None => Err("The string was exhausted before reaching an \
-                         acceptance state"
-                .to_string()),
+            None => Err(Exhausted(string.into()).into()),
             Some(mut thread) => {
                 if thread.capture_begin.is_some() {
                     thread.end_capture(string.len());
@@ -270,6 +379,7 @@ impl<T> NFA<T> {
         }
     }
 
+    /// Process a singular character through some number of canditate threads
     #[inline]
     fn process_char(&self, threads: Vec<Thread>, char: char, pos: usize) -> Vec<Thread> {
         let mut returned = Vec::with_capacity(threads.len());
@@ -277,25 +387,31 @@ impl<T> NFA<T> {
         for mut thread in threads {
             let current_state = self.get(thread.state);
 
-            let mut count = 0;
-            let mut found_state = 0;
+            // PERFORMANCE:
+            // Update the state in place if only one future state matches
+            // This avoids extra allocations
+            {
+                let mut count = 0;
+                let mut found_state = 0;
 
-            for &index in &current_state.next_states {
-                let state = &self.states[index];
+                for &index in &current_state.next_states {
+                    let state = &self.states[index];
 
-                if state.chars.matches(char) {
-                    count += 1;
-                    found_state = index;
+                    if state.chars.matches(char) {
+                        count += 1;
+                        found_state = index;
+                    }
+                }
+
+                if count == 1 {
+                    thread.state = found_state;
+                    capture(self, &mut thread, current_state.index, found_state, pos);
+                    returned.push(thread);
+                    continue;
                 }
             }
 
-            if count == 1 {
-                thread.state = found_state;
-                capture(self, &mut thread, current_state.index, found_state, pos);
-                returned.push(thread);
-                continue;
-            }
-
+            // Add all other states
             for &index in &current_state.next_states {
                 let state = &self.states[index];
                 if state.chars.matches(char) {
@@ -309,15 +425,18 @@ impl<T> NFA<T> {
         returned
     }
 
+    /// Get a state at a position immutably
     #[inline]
     pub fn get(&self, state: usize) -> &State<T> {
         &self.states[state]
     }
 
+    /// Get a state at a position mutably
     pub fn get_mut(&mut self, state: usize) -> &mut State<T> {
         &mut self.states[state]
     }
 
+    /// Add an edge from a state `index` to a character class
     pub fn put(&mut self, index: usize, chars: CharacterClass) -> usize {
         {
             let state = self.get(index);
@@ -335,31 +454,37 @@ impl<T> NFA<T> {
         state
     }
 
+    /// Add an edge from a state to another state
     pub fn put_state(&mut self, index: usize, child: usize) {
         if !self.states[index].next_states.contains(&child) {
             self.get_mut(index).next_states.push(child);
         }
     }
 
+    /// Indicate that this state can be accepted
     pub fn acceptance(&mut self, index: usize) {
         self.get_mut(index).acceptance = true;
         self.acceptance[index] = true;
     }
 
+    /// Indicate that this state starts a capture
     pub fn start_capture(&mut self, index: usize) {
         self.get_mut(index).start_capture = true;
         self.start_capture[index] = true;
     }
 
+    /// Indicate that this state ends a capture
     pub fn end_capture(&mut self, index: usize) {
         self.get_mut(index).end_capture = true;
         self.end_capture[index] = true;
     }
 
+    /// Add some metadata to a state
     pub fn metadata(&mut self, index: usize, metadata: T) {
         self.get_mut(index).metadata = Some(metadata);
     }
 
+    /// Create a new state from a character class
     fn new_state(&mut self, chars: CharacterClass) -> usize {
         let index = self.states.len();
         let state = State::new(index, chars);
@@ -373,6 +498,7 @@ impl<T> NFA<T> {
     }
 }
 
+/// Create a cloned thread with modified state
 #[inline]
 fn fork_thread<T>(thread: &Thread, state: &State<T>) -> Thread {
     let mut new_trace = thread.clone();
@@ -380,6 +506,7 @@ fn fork_thread<T>(thread: &Thread, state: &State<T>) -> Thread {
     new_trace
 }
 
+/// Start an end captures on a thread if we need to
 #[inline]
 fn capture<T>(
     nfa: &NFA<T>,

@@ -1,3 +1,4 @@
+#[deny(missing_docs)]
 use std::{
     cmp::Ordering,
     collections::{btree_map, BTreeMap},
@@ -8,6 +9,7 @@ use crate::nfa::{CharacterClass, NFA};
 
 pub mod nfa;
 
+/// The metadata that we will store in the acceptance points of the NFA
 #[derive(Clone)]
 struct Metadata {
     statics: u32,
@@ -17,6 +19,7 @@ struct Metadata {
 }
 
 impl Metadata {
+    /// Create a new Metadata object
     pub fn new() -> Self {
         Self {
             statics: 0,
@@ -63,26 +66,31 @@ impl PartialEq for Metadata {
 
 impl Eq for Metadata {}
 
+/// A data structure that holds a bunch of parameters that map from one key to a value
 #[derive(PartialEq, Clone, Debug, Default)]
 pub struct Params {
     map: BTreeMap<String, String>,
 }
 
 impl Params {
+    /// Create a new parameter set
     pub fn new() -> Self {
         Self {
             map: BTreeMap::new(),
         }
     }
 
+    /// Insert a new key and value into the parameter set
     pub fn insert(&mut self, key: String, value: String) {
         self.map.insert(key, value);
     }
 
+    /// Find and return the string relating to a particular key, or `None` otherwise
     pub fn find(&self, key: &str) -> Option<&str> {
         self.map.get(key).map(|s| &s[..])
     }
 
+    /// Iterate over parameters in the set
     pub fn iter(&self) -> Iter<'_> {
         Iter(self.map.iter())
     }
@@ -107,6 +115,7 @@ impl<'a> IntoIterator for &'a Params {
     }
 }
 
+/// An interator over a parameter set
 pub struct Iter<'a>(btree_map::Iter<'a, String, String>);
 
 impl<'a> Iterator for Iter<'a> {
@@ -122,17 +131,21 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
+/// A structure that indicates that the router found a match.
+/// Comprises of the metadata to return and the parameters set.
 pub struct Match<T> {
     pub handler: T,
     pub params: Params,
 }
 
 impl<T> Match<T> {
+    /// Create a new Match
     pub fn new(handler: T, params: Params) -> Self {
         Self { handler, params }
     }
 }
 
+/// A data structure that can recognize and return arbitrary routes with flexible parameter names.
 #[derive(Clone)]
 pub struct Router<T> {
     nfa: NFA<Metadata>,
@@ -140,6 +153,7 @@ pub struct Router<T> {
 }
 
 impl<T> Router<T> {
+    /// Create a new Router.
     pub fn new() -> Self {
         Self {
             nfa: NFA::new(),
@@ -147,6 +161,7 @@ impl<T> Router<T> {
         }
     }
 
+    /// Add a `route` to the Router, with a value to return if the route is recognized.
     pub fn add(&mut self, mut route: &str, dest: T) {
         if !route.is_empty() && route.as_bytes()[0] == b'/' {
             route = &route[1..];
@@ -180,6 +195,7 @@ impl<T> Router<T> {
         self.handlers.insert(state, dest);
     }
 
+    /// Attempt to find a route defined by `path` in the Router
     pub fn recognize(&self, mut path: &str) -> Result<Match<&T>, String> {
         if !path.is_empty() && path.as_bytes()[0] == b'/' {
             path = &path[1..];
@@ -204,7 +220,7 @@ impl<T> Router<T> {
                 let handler = self.handlers.get(&nfa_match.state).unwrap();
                 Ok(Match::new(handler, map))
             }
-            Err(str) => Err(str),
+            Err(err) => Err(err.to_string()),
         }
     }
 }
