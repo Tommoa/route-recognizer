@@ -133,6 +133,7 @@ impl<'a> Iterator for Iter<'a> {
 
 /// A structure that indicates that the router found a match.
 /// Comprises of the metadata to return and the parameters set.
+#[derive(Debug)]
 pub struct Match<T> {
     pub handler: T,
     pub params: Params,
@@ -146,10 +147,10 @@ impl<T> Match<T> {
 }
 
 /// A data structure that can recognize and return arbitrary routes with flexible parameter names.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Router<T> {
     nfa: NFA<Metadata>,
-    handlers: BTreeMap<usize, T>,
+    handlers: BTreeMap<usize, std::sync::Arc<T>>,
 }
 
 impl<T> Router<T> {
@@ -169,9 +170,10 @@ impl<T> Router<T> {
         }
 
         let nfa = &mut self.nfa;
-        let mut state = 0;
+        let mut state;
         let mut metadata = Metadata::new();
         let segments: Vec<_> = route.split('/').collect();
+        let mut finishing = vec![0];
 
         for (i, segment) in segments.iter().enumerate() {
             // Special logic for tide, which appends a special globbing pattern
@@ -179,16 +181,19 @@ impl<T> Router<T> {
             if i == segments.len() - 1 && *segment == "*--tide-path-rest" {
                 metadata.stars += 1;
                 metadata.param_names.push("--tide-path-rest".into());
+                state = finishing.pop().unwrap();
                 state = nfa.put(state, CharacterClass::any());
+                finishing.push(state);
                 // Links to itself for repeats
                 nfa.put_state(state, state);
                 nfa.start_capture(state);
                 nfa.end_capture(state);
                 continue;
             }
-            let mut chars = segment.chars();
+            let mut chars = segment.chars().peekable();
             let mut is_static = true;
             while let Some(char) = chars.next() {
+                state = finishing.pop().unwrap();
                 if char == '{' {
                     let param_name: String = chars.by_ref().take_while(|c| *c != '}').collect();
                     let (param_name, pattern) =
@@ -204,6 +209,7 @@ impl<T> Router<T> {
                             nfa.put_state(state, state);
                             nfa.start_capture(state);
                             nfa.end_capture(state);
+                            finishing.push(state);
                         }
                         // * indicates a greedy glob
                         Some(b'*') => {
@@ -213,6 +219,7 @@ impl<T> Router<T> {
                             nfa.put_state(state, state);
                             nfa.start_capture(state);
                             nfa.end_capture(state);
+                            finishing.push(state);
                         }
                         // ! indicates that we go until one of the following characters is met
                         Some(b'!') => {
@@ -223,34 +230,93 @@ impl<T> Router<T> {
                             nfa.put_state(state, state);
                             nfa.start_capture(state);
                             nfa.end_capture(state);
+                            finishing.push(state);
+                        }
+                        // ~ indicates that we can't end with the following string
+                        Some(b'~') => {
+                            metadata.dynamics += 1;
+                            let len = pattern.len() - 2;
+                            let mut anti_state = 0;
+                            let mut initial = 0;
+                            let mut anti_string = String::with_capacity(4);
+                            anti_string.push('/');
+                            if let Some(finish_char) = chars.peek() {
+                                // Don't consume
+                                // As it stands, this won't work because if the finish character is
+                                // in the `anti_string`, then we'll loop back to it as though it
+                                // wasn't in the `anti_string` and finish with a supposedly "valid"
+                                // ending character.
+                                //
+                                // Simple example - "{foo:~bar}b"
+                                panic!("Having a negative string with a trailing char {} isn't currently supported", finish_char);
+                            }
+                            for (i, c) in pattern[2..].chars().enumerate() {
+                                if i == 0 {
+                                    anti_string.push(c);
+                                    anti_string.push('\0');
+                                }
+                                anti_string.pop();
+                                anti_string.push(c);
+                                let new_anti_state =
+                                    nfa.put(state, CharacterClass::invalid(&anti_string));
+                                state = nfa.put(state, CharacterClass::valid_char(c));
+                                if i == 0 {
+                                    initial = state;
+                                    anti_state = new_anti_state;
+                                }
+                                nfa.put_state(state, initial);
+                                nfa.put_state(new_anti_state, anti_state);
+                                nfa.put_state(new_anti_state, initial);
+                                if i != len - 1 {
+                                    finishing.push(state);
+                                    finishing.push(new_anti_state);
+                                } else {
+                                    nfa.put_state(state, anti_state);
+                                    finishing.push(new_anti_state);
+                                }
+                                nfa.start_capture(state);
+                                nfa.start_capture(new_anti_state);
+                                nfa.end_capture(state);
+                                nfa.end_capture(new_anti_state);
+                            }
                         }
                         // Otherwise we go whilst we have one of the following characters
                         Some(_) => {
                             metadata.dynamics += 1;
-                            let state = nfa.put(state, CharacterClass::valid(&pattern[1..]));
+                            state = nfa.put(state, CharacterClass::valid(&pattern[1..]));
                             nfa.put_state(state, state);
                             nfa.start_capture(state);
                             nfa.end_capture(state);
+                            finishing.push(state);
                         }
                     }
                 } else {
                     state = nfa.put(state, CharacterClass::valid_char(char));
+                    finishing.push(state);
                 }
             }
 
             // We've finished this segment, so we need to cap it off with a '/'
             if i != segments.len() - 1 {
                 // Create a new state
+                state = finishing.pop().unwrap();
                 state = nfa.put(state, CharacterClass::valid_char('/'));
+                for finish in finishing.drain(..) {
+                    nfa.put_state(finish, state);
+                }
+                finishing.push(state);
             }
             if is_static {
                 metadata.statics += 1;
             }
         }
 
-        nfa.acceptance(state);
-        nfa.metadata(state, metadata);
-        self.handlers.insert(state, dest);
+        let dest = std::sync::Arc::new(dest);
+        for state in finishing.drain(..) {
+            nfa.acceptance(state);
+            nfa.metadata(state, metadata.clone());
+            self.handlers.insert(state, dest.clone());
+        }
     }
 
     /// Attempt to find a route defined by `path` in the Router
@@ -479,6 +545,86 @@ mod tests {
         let m = m.unwrap();
         assert_eq!(*m.handler, 0);
         assert_eq!(m.params, two_params("prefix", "foo", "end", "foo"))
+    }
+
+    #[test]
+    fn anti_finish() {
+        let mut router = Router::new();
+
+        router.add("/{prefix:~bar}", 0);
+
+        let m = router.recognize("/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+
+        let m = router.recognize("/fooba");
+        assert!(m.is_ok());
+
+        let m = router.recognize("/foobara");
+        assert!(m.is_ok());
+
+        let m = router.recognize("/foobarb");
+        assert!(m.is_ok());
+
+        let m = router.recognize("/foobarba");
+        assert!(m.is_ok());
+
+        let m = router.recognize("/foobarbar");
+        assert!(m.is_err());
+
+        let m = router.recognize("/foobar");
+        assert!(m.is_err());
+    }
+
+    #[test]
+    fn anti_finish_multi() {
+        let mut router = Router::new();
+
+        router.add("/{prefix:~bar}/{foo}", 0);
+        router.add("/{prefix}bar/{foo}", 1);
+
+        let m = router.recognize("/foo/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+        assert_eq!(m.params, two_params("prefix", "foo", "foo", "foo"));
+
+        let m = router.recognize("/fooba/bar");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+        assert_eq!(m.params, two_params("prefix", "fooba", "foo", "bar"));
+
+        let m = router.recognize("/foobara/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+        assert_eq!(m.params, two_params("prefix", "foobara", "foo", "foo"));
+
+        let m = router.recognize("/foobarb/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+        assert_eq!(m.params, two_params("prefix", "foobarb", "foo", "foo"));
+
+        let m = router.recognize("/foobarba/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 0);
+        assert_eq!(m.params, two_params("prefix", "foobarba", "foo", "foo"));
+
+        let m = router.recognize("/foobar/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 1);
+        assert_eq!(m.params, two_params("prefix", "foo", "foo", "foo"));
+
+        let m = router.recognize("/foobarbar/foo");
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_eq!(*m.handler, 1);
+        assert_eq!(m.params, two_params("prefix", "foobar", "foo", "foo"));
     }
 
     fn params(key: &str, val: &str) -> Params {

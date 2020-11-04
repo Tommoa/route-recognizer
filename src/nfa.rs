@@ -177,6 +177,7 @@ impl Thread {
     pub fn extract<'a>(&self, source: &'a str) -> Vec<&'a str> {
         self.captures
             .iter()
+            .filter(|&&(begin, end)| begin != end)
             .map(|&(begin, end)| &source[begin..end])
             .collect()
     }
@@ -519,7 +520,10 @@ fn capture<T>(
         thread.start_capture(pos);
     }
 
-    if thread.capture_begin != None && nfa.end_capture[current_state] && next_state > current_state
+    if thread.capture_begin != None
+        && nfa.end_capture[current_state]
+        && next_state > current_state
+        && !nfa.start_capture[next_state]
     {
         thread.end_capture(pos);
     }
